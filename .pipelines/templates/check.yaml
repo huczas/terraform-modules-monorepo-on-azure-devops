@@ -20,7 +20,17 @@ stages:
       matrix: $[ stageDependencies.detect.detect.outputs['plan.changedModules'] ]
     steps:
     - checkout: self
-    
+
+    - script: |
+        if ! command -v terraform &> /dev/null; then
+          wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install terraform
+        else
+          echo "Terraform is already installed"
+        fi
+      displayName: 'Install Terraform if not present'
+
     - pwsh: |
         terraform -chdir="./$(module)" fmt -write=false -diff -check
       displayName: terraform fmt 📄
@@ -35,7 +45,7 @@ stages:
       matrix: $[ stageDependencies.detect.detect.outputs['plan.changedModules'] ]
     steps:
     - checkout: self
-    
+
     - bash: |
         docker pull bridgecrew/checkov
         docker run --volume $(pwd):/$(module) bridgecrew/checkov --directory /$(module)
@@ -47,7 +57,7 @@ stages:
       matrix: $[ stageDependencies.detect.detect.outputs['plan.changedModules'] ]
     steps:
     - checkout: self
-    
+
     - bash: |
         docker pull aquasec/tfsec
         docker run --volume $(pwd):/$(module) aquasec/tfsec /$(module)
