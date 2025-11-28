@@ -12,7 +12,7 @@ stages:
     steps:
     - checkout: self
       persistCredentials: true
-      
+
     - pwsh: |
         $payload = '$(releases)' | convertfrom-json
 
@@ -21,8 +21,8 @@ stages:
         $message = "($date) PR #$(pullRequestId) - $(pullRequestTitle)"
         $description = "- $(changelogEntry)"
 
-        git config --global user.email "build@sdncenter.pl"
-        git config --global user.name "Project Collection Build Service (sdncenterspzoo)"
+        git config --global user.email "build@bluesoft.com"
+        git config --global user.name "Project Collection Build Service"
 
         $payload.releases | ForEach-Object {
             $branchName = "tmp_$($_.module)_$($_.new)"
@@ -35,9 +35,9 @@ stages:
             $minorTag = "$($module)/v$($major).$($minor)"
 
             git checkout "$($payload.sha)"
-            
+
             write-host "module: $module"
-            
+
             Copy-Item -Path $module `
                     -Destination "./_workingtmp/" `
                     -Recurse `
@@ -64,7 +64,11 @@ stages:
                         -Recurse
 
             git rm -r ".pipelines"
+            git rm ".commitlintrc.json"
+            git rm ".editorconfig"
             git rm ".gitignore"
+            git rm ".releaserc.json"
+            git rm ".terraform-version"
             git rm ".tflint.hcl"
 
             git add .
@@ -93,7 +97,7 @@ stages:
     - checkout: self
 
     - bash: |
-        wget https://github.com/terraform-docs/terraform-docs/releases/download/v0.15.0/terraform-docs-v0.15.0-linux-amd64.tar.gz \
+        wget https://github.com/terraform-docs/terraform-docs/releases/download/v0.20.0/terraform-docs-v0.20.0-linux-amd64.tar.gz \
           --output-document - \
           --progress dot:mega \
         | tar -xvz
@@ -101,6 +105,9 @@ stages:
 
     - pwsh: |
         $version = (('$(releases)' | convertfrom-json).releases | where-object {$_.module -eq "$(module)"}).new
+
+        # Examples are now included; no skip logic.
+
         mkdir $(module)/output
         $intro = @"
         [[_TOC_]]
@@ -115,7 +122,7 @@ stages:
         ``````
 
         # Module Attributes
-        "@ 
+        "@
         $intro | Out-File "$(module)/output/documentation.md"
 
         $currentDir = (Get-Location).Path
@@ -126,27 +133,59 @@ stages:
       displayName: Generate docs ✍
 
     - pwsh: |
+        # Include example directories; ensure ancestor pages exist before publishing.
+
+        function Ensure-WikiPage {
+          param(
+            [string]$WikiName,
+            [string]$Path,
+            [hashtable]$Headers
+          )
+          $baseUri = "$env:SYSTEM_TEAMFOUNDATIONSERVERURI$env:SYSTEM_TEAMPROJECT/_apis/wiki/wikis/$WikiName/pages?path=$Path&api-version=7.1"
+          try {
+            Invoke-WebRequest "$($baseUri)&includecontent=true" -Method GET -Headers $Headers | Out-Null
+          }
+          catch {
+            try { $err = $_.ErrorDetails.Message | ConvertFrom-Json } catch { $err = $null }
+            if ($err -and $err.typeKey -eq "WikiPageNotFoundException") {
+              $body = @{content = "<!-- AUTO-GENERATED ANCESTOR PLACEHOLDER -->"} | ConvertTo-Json -Compress
+              Invoke-RestMethod -Uri $baseUri -Method PUT -Headers $Headers -ContentType 'application/json; charset=utf-8' -Body $body
+            }
+            else { throw }
+          }
+        }
+
         $rootPageName = "$($env:BUILD_REPOSITORY_NAME)".Replace(' ','-')
 
         $version = (('$(releases)' | convertfrom-json).releases | where-object {$_.module -eq "$(module)"}).new
-        $docs = get-content -raw "$(module)/output/documentation.md" | Out-String 
+        $docs = get-content -raw "$(module)/output/documentation.md" | Out-String
         $wikiName = ('{0}.wiki' -f $($env:SYSTEM_TEAMPROJECT).Replace(' ','-'))
         $headers = @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
 
         try {
           $rootPageParams = @{
-            'Uri'         = "$env:SYSTEM_TEAMFOUNDATIONSERVERURI$env:SYSTEM_TEAMPROJECT/_apis/wiki/wikis/$wikiName/pages?path=$rootPageName&api-version=5.1"
+            'Uri'         = "$env:SYSTEM_TEAMFOUNDATIONSERVERURI$env:SYSTEM_TEAMPROJECT/_apis/wiki/wikis/$wikiName/pages?path=$rootPageName&api-version=7.1"
             'Headers'     = $headers
             'Method'      = 'PUT'
             'ContentType' = 'application/json; charset=utf-8'
-            'body'        =  @{content = "[[_TOSP_]]"} | ConvertTo-Json -Compress 
+            'body'        =  @{content = "[[_TOSP_]]"} | ConvertTo-Json -Compress
           }
-
           Invoke-RestMethod @rootPageParams
         }
         catch {}
 
-        $uri = "$env:SYSTEM_TEAMFOUNDATIONSERVERURI$env:SYSTEM_TEAMPROJECT/_apis/wiki/wikis/$wikiName/pages?path=$rootPageName/$(module)&comment=$(module)`@$($version)&api-version=5.1"
+        # Ensure ancestor pages for nested module paths (e.g., module "azure_databricks_workspace/examples/advanced")
+        $segments = "$(module)".Split('/')
+        if ($segments.Length -gt 1) {
+          $accum = ''
+          for ($i = 0; $i -lt $segments.Length - 1; $i++) {
+            if ($accum) { $accum = "$accum/$($segments[$i])" } else { $accum = $segments[$i] }
+            $ancestorPath = "$rootPageName/$accum"
+            Ensure-WikiPage -WikiName $wikiName -Path $ancestorPath -Headers $headers
+          }
+        }
+
+        $uri = "$env:SYSTEM_TEAMFOUNDATIONSERVERURI$env:SYSTEM_TEAMPROJECT/_apis/wiki/wikis/$wikiName/pages?path=$rootPageName/$(module)&comment=$(module)`@$($version)&api-version=7.1"
 
         try {
           $wikiPage = Invoke-WebRequest "$($uri)&includecontent=true" -Method GET -Headers $headers
@@ -164,9 +203,9 @@ stages:
         $prUrl = "$env:SYSTEM_TEAMFOUNDATIONSERVERURI$([uri]::EscapeDataString("$env:SYSTEM_TEAMPROJECT/_git/$($env:BUILD_REPOSITORY_NAME)/pullrequest/$(pullRequestId)"))"
 
         $date = Get-Date -Format dd-MM-yyyy
-        
+
         $changelog = @"
-        
+
         # Changelog
         <!-- CHANGELOG -->
         ## $version ($date)
@@ -191,9 +230,9 @@ stages:
         $existingChangelog
         "@
         }
-        
+
         $page = $docs -replace "(?s)(?<=!-- END_TF_DOCS -->).+?","$changelog"
-        $markdown = @{content = $page } | ConvertTo-Json -Compress 
+        $markdown = @{content = $page } | ConvertTo-Json -Compress
 
         $params = @{
             'Uri'         = $uri
@@ -204,7 +243,7 @@ stages:
         }
 
         $params | ConvertTo-Json
-        
+
         Invoke-RestMethod @params
       env:
         SYSTEM_ACCESSTOKEN: $(System.AccessToken)
